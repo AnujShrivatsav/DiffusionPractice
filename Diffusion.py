@@ -54,12 +54,34 @@ class DiffusionModel:
         # getting the alpha hat for time step 1 and 3 in diffusion and reshaping to match dimensions of input image
         # for multiplication later
         sqrt_alpha_hats = self.get_index_from_list(self.alpha_hat.sqrt(), t, x0.shape)
-        sqrt_info_alpha_hats = self.get_index_from_list(torch.sqrt(1 - self.alpha_hats), t, x0.shape)
+        sqrt_info_alpha_hats = self.get_index_from_list(torch.sqrt(1 - self.alphas), t, x0.shape)
         # mean and variance of the noisy image using the image provided or x0
         noise = torch.rand_like(x0)
         mean = sqrt_alpha_hats.to(device) * x0.to(device)
         variance = sqrt_info_alpha_hats.to(device) * noise.to(device)
         return mean + variance, noise.to(device)
+
+    @torch.no_grad()
+    def backward_diffusion(self, x, t, model):
+        '''
+        calls the model to predict the noise added at that time step.
+        slowly obtains the denoised image from true data distribution
+        Applied noise to the image if not in last step
+        x_t-1 = 1/sqrt(alpha_t) (x_t - beta_t*model(x_t, t)/sqrt(1-alpha_hat_t)) + sigma_t*z
+        where z is sampled from a zero mean unit var gaussian if t >= 1 that is before returning the original image step
+        '''
+        betas_t = self.get_index_from_list(self.betas, t, x.shape)
+        sqrt_recip_alphas = self.get_index_from_list(torch.sqrt(1.0/self.alpha_hat), t, x.shape)
+        sqrt_one_minus_alpha_hats = self.get_index_from_list(torch.sqrt(1 - self.alpha_hat), t, x.shape)
+        mean = sqrt_one_minus_alpha_hats * (x - betas_t*model(x, t)/sqrt_one_minus_alpha_hats)
+        posterior_variance = betas_t
+
+        if t == 0:
+            return mean
+        else:
+            z = torch.rand_like(x)
+            variance = torch.sqrt(posterior_variance)*z
+            return mean + variance
 
     @staticmethod
     def get_index_from_list(values, t, x0_shape):
@@ -100,7 +122,6 @@ if __name__== "__main__":
         if epoch % print_freq == 0:
             print('---')
             print(f'Epoch: {epoch} | Train loss: {np.mean(epoch_losses)}')
-
 
 
 
