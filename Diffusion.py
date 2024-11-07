@@ -6,8 +6,10 @@ import urllib
 import PIL
 import matplotlib.pyplot as plt
 import numpy as np
+from Model import UNet
+import os
 
-device = 'cpu'
+device = 'cuda'
 
 transform = transforms.Compose([
     transforms.Resize((32, 32)),
@@ -17,9 +19,9 @@ transform = transforms.Compose([
 
 reverse_transform = transforms.Compose([
     transforms.Lambda(lambda t: (t + 1)/2), # scale is back to 0-1
-    transforms.Lambda(lambda t: t.permute(1, 2, 0)), #CHW to HCW ie torch to numpy
+    transforms.Lambda(lambda t: t.squeeze().permute(1, 2, 0)), #CHW to HCW ie torch to numpy
     transforms.Lambda(lambda t: t * 255.), # scale data between 0-255
-    transforms.Lambda(lambda t: t.numpy().astype(np.uint8)), # convert to uint8 numpy array
+    transforms.Lambda(lambda t: t.cpu().numpy().astype(np.uint8)), # convert to uint8 numpy array
     transforms.ToPILImage(), # Convert back to PIL Image
 ])
 
@@ -38,7 +40,7 @@ class DiffusionModel:
         # contains values for each time step in diffusion
         self.alpha_hat = torch.cumprod(self.alphas, axis=0)
 
-    def get_sample_image()-> PIL.Image.Image:
+    def get_sample_image(self)-> PIL.Image.Image:
         url = 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTZmJy3aSZ1Ix573d2MlJXQowLCLQyIUsPdniOJ7rBsgG4XJb04g9ZFA9MhxYvckeKkVmo&usqp=CAU'
         filename = 'racoon.jpg'
         urllib.request.urlretrieve(url, filename)
@@ -76,6 +78,13 @@ class DiffusionModel:
         mean = sqrt_one_minus_alpha_hats * (x - betas_t*model(x, t)/sqrt_one_minus_alpha_hats)
         posterior_variance = betas_t
 
+        output = []
+        # handle the case where a set of time steps can be zero
+        # zero_values = t[mask = (t == 0)]
+        # for values in zero_values:
+        #     output.append(mean)
+        # for values in t and not in zero_values:
+        #     output.append(mean)
         if t == 0:
             return mean
         else:
@@ -86,34 +95,35 @@ class DiffusionModel:
     @staticmethod
     def get_index_from_list(values, t, x0_shape):
         bs = t.shape[0]
-        result = torch.gather(-1, t.cpu())
+        result = torch.gather(values, -1, t.cpu())
         '''
         reshape to (bs, 1, 1, 1) dims so len(x0_shape)
         '''
-        return result.reshape(bs, *((1,) * len(x0_shape - 1))).to(t.device)
-        
+        return result.view(bs, *((1,) * (len(x0_shape)-1))).to(t.device)
 
 if __name__== "__main__":
-    unet = UNet()
     diffusion_model = DiffusionModel()
-    batch_size = 32
+    batch_size = 1
     lr = 1e-3
-    no_epochs = 100
-    print_freq = 10
-    optimizer = torch.optim.Adam(unet.parameters(), lr)
-    image = get_sample_image()
+    no_epochs = 10000
+    print_freq = 500
+    image = diffusion_model.get_sample_image()
+    height, width = image.size
     x0 = transform(image)
     # creating batch of the same images
     x0 = torch.stack([x0]*batch_size)
+    unet = UNet(x0.shape[1]).to(device)
+    optimizer = torch.optim.Adam(unet.parameters(), lr)
+    save_dir = "Denoised_Images/"
     for epoch in range(no_epochs):
         epoch_losses = []
 
         t = torch.randint(0, diffusion_model.timesteps, (batch_size, )).long()
         noisy_img, gt_noise = diffusion_model.forward_diffusion(x0, t, device)
-        preds = unet(noisy_img, t)
+        preds = unet(noisy_img, t.to(device))
 
         optimizer.zero_grad()
-        loss = torch.nn.functional.mse_loss(noise, preds)
+        loss = torch.nn.functional.mse_loss(gt_noise, preds)
 
         epoch_losses.append(loss.item())
         loss.backward()
@@ -122,6 +132,20 @@ if __name__== "__main__":
         if epoch % print_freq == 0:
             print('---')
             print(f'Epoch: {epoch} | Train loss: {np.mean(epoch_losses)}')
+            plt.figure(figsize=(5, 5))
+            denoised_img = diffusion_model.backward_diffusion(noisy_img, t.to(device), unet)
+            resize_transform = transforms.Resize((height, width))
+            denoised_img = resize_transform(denoised_img)
+            denoised_img = reverse_transform(denoised_img)
+            plt.imshow(denoised_img, cmap='gray')
+            plt.axis('off')
+            plt.title(f'Epoch {epoch}')
+            
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            
+            plt.savefig(os.path.join(save_dir, f'prediction_epoch_{epoch}.png'))
+            plt.close()
 
 
 
